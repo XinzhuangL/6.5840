@@ -22,8 +22,19 @@ type ExampleReply struct {
 	Y int
 }
 
-// Add your RPC definitions here.
+// 传入自己的WorkerId 由Coordinator分配 Map 或 Reduce
+type TaskArgs struct {
+	ID int
+}
 
+type TaskReply struct {
+	Type           int      //任务类型 Map 或者 Reduce 0: Map 1: Reduce
+	ID             int      // valid type=0 or 1
+	FileNums       int      // 输出文件个数，即分配给几个Reduce Map使用  valid type = 0
+	InputFileNames []string // 输入文件名称 供Map读取  valid type = 0
+}
+
+// Add your RPC definitions here.
 
 // Cook up a unique-ish UNIX-domain socket name
 // in /var/tmp, for the coordinator.
