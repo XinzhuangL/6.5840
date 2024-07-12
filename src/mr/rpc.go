@@ -28,10 +28,11 @@ type TaskArgs struct {
 }
 
 type TaskReply struct {
-	Type           int      //任务类型 Map 或者 Reduce 0: Map 1: Reduce
-	ID             int      // valid type=0 or 1
-	FileNums       int      // 输出文件个数，即分配给几个Reduce Map使用  valid type = 0
-	InputFileNames []string // 输入文件名称 供Map读取  valid type = 0
+	Type          int    //任务类型 Map 或者 Reduce 0: Map 1: Reduce -1 FinishedFlag
+	ID            int    // valid type=0 or 1
+	FileNums      int    // 输出文件个数，即分配给几个Reduce Map使用  valid type = 0
+	InputFileName string // 输入文件名称 供Map读取  valid type = 0 暂时为1
+	InputFileSize int    // 输入文件个数 valid type = 1
 }
 
 // Add your RPC definitions here.
