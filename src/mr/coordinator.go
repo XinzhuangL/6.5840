@@ -19,21 +19,21 @@ type Coordinator struct {
 
 func (c *Coordinator) initMapTask(files []string, nReduce int) {
 	for i, file := range files {
-		c.mapTask.Enqueue(TaskReply{
-			Type:          0,
-			ID:            i,
-			FileNums:      nReduce,
-			InputFileName: file,
+		c.mapTask.Enqueue(&TaskReply{
+			Type:           0,
+			ID:             i,
+			BucketNums:     nReduce,
+			InputFileNames: []string{file},
 		})
 	}
 }
 
 func (c *Coordinator) initReduceTask(files []string, nReduce int) {
 	for i := 0; i < nReduce; i++ {
-		c.reduceTask.Enqueue(TaskReply{
+		c.reduceTask.Enqueue(&TaskReply{
 			Type:          1,
 			ID:            i,
-			InputFileSize: len(files), // reade out-x-ID  0 <= x < InputFileSize
+			InputFileNums: len(files), // reade out-x-ID  0 <= x < InputFileSize
 		})
 	}
 }
@@ -41,29 +41,40 @@ func (c *Coordinator) initReduceTask(files []string, nReduce int) {
 //	rpc call
 //
 // first fetch Map, if finished fetch Reduce
-func (c *Coordinator) FetchTask(workId *TaskArgs, reply *TaskReply) {
+func (c *Coordinator) FetchTask(workId *TaskArgs, reply *TaskReply) error {
+	log.Printf("FetchTask(%v)", *workId)
 
-	reply = c.finishedFlagTask
+	*reply = *c.finishedFlagTask
 
 	if !c.mapTask.Empty() {
-		reply, ok := c.mapTask.Dequeue().(*TaskReply)
+		task, ok := c.mapTask.Dequeue().(*TaskReply)
 		if !ok {
 			fmt.Printf("err type of map task dequeue")
-			return
+			return nil
 		}
+		*reply = *task
 		c.workIdToTask[workId.ID] = reply
-		return
+		for workID, taskReply := range c.workIdToTask {
+			log.Printf("Worker ID: %d, Task Reply: %+v\n", workID, taskReply)
+		}
+		return nil
 	}
 
+	// todo all map finished, then we can dispatch reduce task
 	if !c.reduceTask.Empty() {
-		reply, ok := c.reduceTask.Dequeue().(*TaskReply)
+		task, ok := c.reduceTask.Dequeue().(*TaskReply)
 		if !ok {
 			fmt.Printf("err type of reduce task dequeue")
-			return
+			return nil
 		}
+		*reply = *task
 		c.workIdToTask[reply.ID] = reply
-		return
+		for workID, taskReply := range c.workIdToTask {
+			log.Printf("Worker ID: %d, Task Reply: %+v\n", workID, taskReply)
+		}
+		return nil
 	}
+	return nil
 }
 
 // Your code here -- RPC handlers for the worker to call.

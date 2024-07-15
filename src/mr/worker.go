@@ -1,7 +1,11 @@
 package mr
 
 import (
+	"bufio"
 	"fmt"
+	"io/ioutil"
+	"os"
+	"sort"
 	"time"
 )
 import "log"
@@ -13,6 +17,12 @@ type KeyValue struct {
 	Key   string
 	Value string
 }
+
+type ByKey []KeyValue
+
+func (a ByKey) Len() int           { return len(a) }
+func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
 // use ihash(key) % NReduce to choose the reduce
 // task number for each KeyValue emitted by Map.
@@ -30,11 +40,16 @@ func Worker(mapf func(string, string) []KeyValue,
 	workID := (int)(time.Now().UnixNano() / 1e6 % 100000)
 	fmt.Printf("Current worker ID: %d\n", workID)
 	isFinished := false
-	for isFinished {
-		time.Sleep(2 * time.Second)
+	for !isFinished {
+		time.Sleep(1 * time.Second)
 		reply := CallFetchTask(workID)
 		if reply != nil {
+			if reply.Type == -1 {
+				fmt.Printf("Task %d is finished\n", workID)
+				break
+			}
 			ExecTask(reply, mapf, reducef)
+			// todo may be all mapTask is dispatch, but not finished
 		} else {
 			isFinished = true
 		}
@@ -51,6 +66,80 @@ func Worker(mapf func(string, string) []KeyValue,
 
 func ExecTask(reply *TaskReply, mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
+	switch reply.Type {
+	case 0:
+		intermediate := make([][]KeyValue, reply.BucketNums)
+		for i := range intermediate {
+			intermediate[i] = []KeyValue{} // 初始化每个桶的切片
+		}
+		for _, filename := range reply.InputFileNames {
+			file, err := os.Open(filename)
+			if err != nil {
+				log.Fatalf("cannot open %v", filename)
+			}
+			content, err := ioutil.ReadAll(file)
+			if err != nil {
+				log.Fatalf("cannot read %v", filename)
+			}
+			file.Close()
+			kva := mapf(filename, string(content))
+			for _, kv := range kva {
+				index := hashToBuckets(kv.Key, reply.BucketNums)
+				intermediate[index] = append(intermediate[index], kv)
+			}
+		}
+		for idx, kvs := range intermediate {
+			sort.Sort(ByKey(kvs))
+			oname := fmt.Sprintf("out-%v-%v", reply.ID, idx)
+			ofile, _ := os.Create(oname)
+			// todo compact
+			for _, kv := range kvs {
+				fmt.Fprintf(ofile, "%v %v\n", kv.Key, kv.Value)
+			}
+			ofile.Close()
+		}
+		// todo call back is finished
+		break
+	case 1:
+		oname := fmt.Sprintf("out-%v", reply.ID)
+		ofile, _ := os.Create(oname)
+		for k := 0; k < reply.InputFileNums; k++ {
+			iname := fmt.Sprintf("out-%v-%v", k, reply.ID)
+			file, _ := os.Open(iname)
+			defer file.Close()
+
+			scanner := bufio.NewScanner(file)
+			intermediate := []KeyValue{}
+			for scanner.Scan() {
+				var kv KeyValue
+				line := scanner.Text()
+				_, err := fmt.Sscanf(line, "%s %s", &kv.Key, &kv.Value)
+				if err != nil {
+					log.Fatalf("cannot parse %v: %v", line, err)
+				}
+				intermediate = append(intermediate, kv)
+			}
+
+			i := 0
+			for i < len(intermediate) {
+				j := i + 1
+				for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
+					j++
+				}
+				values := []string{}
+				for k := i; k < j; k++ {
+					values = append(values, intermediate[k].Value)
+				}
+				output := reducef(intermediate[i].Key, values)
+				fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, output)
+				i = j
+			}
+		}
+		ofile.Close()
+		break
+	default:
+		fmt.Printf("task type: %d\n", reply.Type)
+	}
 
 }
 
@@ -66,6 +155,14 @@ func CallFetchTask(workID int) *TaskReply {
 		return nil
 	}
 
+}
+
+func hashToBuckets(s string, numBuckets int) uint32 {
+	h := fnv.New32a()
+	h.Write([]byte(s))
+	hash := h.Sum32()
+	bucket := hash % uint32(numBuckets)
+	return bucket
 }
 
 // example function to show how to make an RPC call to the coordinator.
