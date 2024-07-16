@@ -24,15 +24,25 @@ type ExampleReply struct {
 
 // 传入自己的WorkerId 由Coordinator分配 Map 或 Reduce
 type TaskArgs struct {
-	ID int
+	WorkerID int
 }
 
 type TaskReply struct {
-	Type           int      //任务类型 Map 或者 Reduce 0: Map 1: Reduce -1 FinishedFlag
-	ID             int      // valid type=0 or 1
-	BucketNums     int      // 输出文件个数，即分配给几个Reduce Map使用  valid type = 0
-	InputFileNames []string // 输入文件名称 供Map读取  valid type = 0 暂时为1
-	InputFileNums  int      // 输入文件个数 valid type = 1
+	Type               int      //任务类型 Map 或者 Reduce 0: Map 1: Reduce -1 FinishedFlag -2 nil
+	TaskID             int      // valid type=0 or 1
+	BucketNums         int      // 输出文件个数，即分配给几个Reduce Map使用  valid type = 0
+	InputFileNames     []string // 输入文件名称，分给每个map的文件数 供Map读取  valid type = 0 暂时为1
+	TotalInputFileNums int      // 总输入文件数x reduce需要读取 output-x-reduceID的文件 valid type = 1
+}
+
+// call back worker 回调
+type CallBackArgs struct {
+	WorkerID int
+	TaskID   int
+	Status   int // success 0 failed -1
+}
+type CallBackReply struct {
+	Status int // success 0  failed -1 调用成功还是失败
 }
 
 // Add your RPC definitions here.

@@ -32,6 +32,11 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
+func hashToBuckets(s string, numBuckets int) int {
+	bucket := ihash(s) % numBuckets
+	return bucket
+}
+
 // main/mrworker.go calls this function.
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
@@ -39,19 +44,20 @@ func Worker(mapf func(string, string) []KeyValue,
 	// init a uuid
 	workID := (int)(time.Now().UnixNano() / 1e6 % 100000)
 	fmt.Printf("Current worker ID: %d\n", workID)
-	isFinished := false
-	for !isFinished {
+	for {
+		// wait coordinator init finished
 		time.Sleep(1 * time.Second)
 		reply := CallFetchTask(workID)
-		if reply != nil {
-			if reply.Type == -1 {
-				fmt.Printf("Task %d is finished\n", workID)
-				break
-			}
+		if reply.Type >= 0 {
 			ExecTask(reply, mapf, reducef)
-			// todo may be all mapTask is dispatch, but not finished
+			CallBackTask(workID, reply.TaskID, 0)
+		} else if reply.Type == -1 {
+			fmt.Printf("All Task is finished\n")
+			break
+		} else if reply.Type == -2 {
+			fmt.Printf("All Task is running\n")
 		} else {
-			isFinished = true
+			log.Fatalf("unknown task type: %d\n", reply.Type)
 		}
 	}
 	// circle call fetch a task
@@ -90,7 +96,7 @@ func ExecTask(reply *TaskReply, mapf func(string, string) []KeyValue,
 		}
 		for idx, kvs := range intermediate {
 			sort.Sort(ByKey(kvs))
-			oname := fmt.Sprintf("out-%v-%v", reply.ID, idx)
+			oname := fmt.Sprintf("out-%v-%v", reply.TaskID, idx)
 			ofile, _ := os.Create(oname)
 			// todo compact
 			for _, kv := range kvs {
@@ -98,13 +104,12 @@ func ExecTask(reply *TaskReply, mapf func(string, string) []KeyValue,
 			}
 			ofile.Close()
 		}
-		// todo call back is finished
 		break
 	case 1:
-		oname := fmt.Sprintf("out-%v", reply.ID)
+		oname := fmt.Sprintf("out-%v", reply.TaskID)
 		ofile, _ := os.Create(oname)
-		for k := 0; k < reply.InputFileNums; k++ {
-			iname := fmt.Sprintf("out-%v-%v", k, reply.ID)
+		for k := 0; k < reply.TotalInputFileNums; k++ {
+			iname := fmt.Sprintf("out-%v-%v", k, reply.TaskID)
 			file, _ := os.Open(iname)
 			defer file.Close()
 
@@ -144,7 +149,7 @@ func ExecTask(reply *TaskReply, mapf func(string, string) []KeyValue,
 }
 
 func CallFetchTask(workID int) *TaskReply {
-	args := TaskArgs{ID: workID}
+	args := TaskArgs{WorkerID: workID}
 	reply := TaskReply{}
 
 	ok := call("Coordinator.FetchTask", &args, &reply)
@@ -157,12 +162,21 @@ func CallFetchTask(workID int) *TaskReply {
 
 }
 
-func hashToBuckets(s string, numBuckets int) uint32 {
-	h := fnv.New32a()
-	h.Write([]byte(s))
-	hash := h.Sum32()
-	bucket := hash % uint32(numBuckets)
-	return bucket
+func CallBackTask(workID int, taskID int, status int) *CallBackReply {
+	args := CallBackArgs{
+		WorkerID: workID,
+		TaskID:   taskID,
+		Status:   status,
+	}
+	reply := CallBackReply{}
+	ok := call("Coordinator.CallBackTask", &args, &reply)
+	if ok {
+		return &reply
+	} else {
+		fmt.Printf("call failed!\n")
+		return nil
+	}
+
 }
 
 // example function to show how to make an RPC call to the coordinator.

@@ -8,43 +8,56 @@ import "net"
 import "os"
 import "net/rpc"
 import "net/http"
+import "sync"
 
 type Coordinator struct {
 	// Your definitions here.
-	mapTask          *Queue
-	reduceTask       *Queue
-	workIdToTask     map[int]*TaskReply
-	finishedFlagTask *TaskReply
+	mapTask      *Queue
+	mapCt        int
+	reduceTask   *Queue
+	reduceCt     int
+	workIdToTask sync.Map
+	ret          bool
+}
+
+var FinishedFlagTaskReply = TaskReply{
+	Type: -1,
+}
+
+var NilFlagTaskReply = TaskReply{
+	Type: -2,
 }
 
 func (c *Coordinator) initMapTask(files []string, nReduce int) {
 	for i, file := range files {
 		c.mapTask.Enqueue(&TaskReply{
 			Type:           0,
-			ID:             i,
+			TaskID:         i,
 			BucketNums:     nReduce,
 			InputFileNames: []string{file},
 		})
+		c.mapCt++
 	}
 }
 
 func (c *Coordinator) initReduceTask(files []string, nReduce int) {
 	for i := 0; i < nReduce; i++ {
 		c.reduceTask.Enqueue(&TaskReply{
-			Type:          1,
-			ID:            i,
-			InputFileNums: len(files), // reade out-x-ID  0 <= x < InputFileSize
+			Type:               1,
+			TaskID:             i,
+			TotalInputFileNums: len(files), // reade out-x-ID  0 <= x < InputFileSize
 		})
+		c.reduceCt++
 	}
 }
 
 //	rpc call
 //
 // first fetch Map, if finished fetch Reduce
-func (c *Coordinator) FetchTask(workId *TaskArgs, reply *TaskReply) error {
-	log.Printf("FetchTask(%v)", *workId)
+func (c *Coordinator) FetchTask(args *TaskArgs, reply *TaskReply) error {
+	log.Printf("FetchTask(%v)", *args)
 
-	*reply = *c.finishedFlagTask
+	//	*reply = *c.finishedFlagTask
 
 	if !c.mapTask.Empty() {
 		task, ok := c.mapTask.Dequeue().(*TaskReply)
@@ -52,15 +65,23 @@ func (c *Coordinator) FetchTask(workId *TaskArgs, reply *TaskReply) error {
 			fmt.Printf("err type of map task dequeue")
 			return nil
 		}
+		// todo need a atomic
 		*reply = *task
-		c.workIdToTask[workId.ID] = reply
-		for workID, taskReply := range c.workIdToTask {
+		c.workIdToTask.Store(args.WorkerID, reply)
+		c.workIdToTask.Range(func(workID, taskReply interface{}) bool {
 			log.Printf("Worker ID: %d, Task Reply: %+v\n", workID, taskReply)
-		}
+			return true
+
+		})
 		return nil
 	}
 
-	// todo all map finished, then we can dispatch reduce task
+	if c.mapCt > 0 {
+		// map not complete finished but queue is empty
+		*reply = NilFlagTaskReply
+		return nil
+	}
+
 	if !c.reduceTask.Empty() {
 		task, ok := c.reduceTask.Dequeue().(*TaskReply)
 		if !ok {
@@ -68,13 +89,61 @@ func (c *Coordinator) FetchTask(workId *TaskArgs, reply *TaskReply) error {
 			return nil
 		}
 		*reply = *task
-		c.workIdToTask[reply.ID] = reply
-		for workID, taskReply := range c.workIdToTask {
+		c.workIdToTask.Store(args.WorkerID, reply)
+		c.workIdToTask.Range(func(workID, taskReply interface{}) bool {
 			log.Printf("Worker ID: %d, Task Reply: %+v\n", workID, taskReply)
-		}
+			return true
+
+		})
 		return nil
 	}
+	log.Printf("FetchTask(%v), all task is finished", *args)
+	*reply = FinishedFlagTaskReply
 	return nil
+}
+
+// call back finished
+func (c *Coordinator) CallBackTask(args *CallBackArgs, reply *CallBackReply) error {
+
+	workID := args.WorkerID
+
+	// todo check status
+	taskInterface, ok := c.workIdToTask.Load(workID)
+	if !ok {
+		log.Printf("Worker ID: %d not found\n", workID)
+		*reply = CallBackReply{
+			Status: -1,
+		}
+	} else {
+		c.workIdToTask.Delete(workID)
+		task, _ := taskInterface.(*TaskReply)
+		if task.Type == 0 {
+			c.mapCt--
+		} else {
+			c.reduceCt--
+		}
+		log.Printf("Remove Worker ID: %d, task: %+v, mapCt: %d, reduceCt: %d\n", workID, task, c.mapCt, c.reduceCt)
+		// call to set finished status
+		c.isFinished()
+	}
+
+	*reply = CallBackReply{
+		Status: 1,
+	}
+	return nil
+}
+
+func (c *Coordinator) isFinished() {
+	c.ret = c.mapTask.Empty() && c.reduceTask.Empty() && !c.hasRunningTask()
+}
+
+func (c *Coordinator) hasRunningTask() bool {
+	empty := true
+	c.workIdToTask.Range(func(k, v interface{}) bool {
+		empty = false
+		return false
+	})
+	return !empty
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -104,11 +173,7 @@ func (c *Coordinator) server() {
 // main/mrcoordinator.go calls Done() periodically to find out
 // if the entire job has finished.
 func (c *Coordinator) Done() bool {
-	ret := false
-
-	// Your code here.
-
-	return ret
+	return c.ret
 }
 
 // create a Coordinator.
@@ -118,10 +183,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{
 		mapTask:      NewQueue(),
 		reduceTask:   NewQueue(),
-		workIdToTask: make(map[int]*TaskReply),
-		finishedFlagTask: &TaskReply{
-			Type: -1,
-		},
+		workIdToTask: sync.Map{},
 	}
 
 	c.initMapTask(files, nReduce)
