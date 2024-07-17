@@ -28,3 +28,7 @@ func (q *Queue) Dequeue() interface{} {
 func (q *Queue) Empty() bool {
 	return q.items.Len() == 0
 }
+
+func (q *Queue) Len() int {
+	return q.items.Len()
+}

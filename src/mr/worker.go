@@ -3,6 +3,7 @@ package mr
 import (
 	"bufio"
 	"fmt"
+	"github.com/google/uuid"
 	"io/ioutil"
 	"os"
 	"sort"
@@ -42,8 +43,8 @@ func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
 	// init a uuid
-	workID := (int)(time.Now().UnixNano() / 1e6 % 100000)
-	fmt.Printf("Current worker ID: %d\n", workID)
+	workID := uuid.New().String()
+	log.Printf("Create a new worker, ID: %d\n", workID)
 	for {
 		// wait coordinator init finished
 		time.Sleep(1 * time.Second)
@@ -52,10 +53,10 @@ func Worker(mapf func(string, string) []KeyValue,
 			ExecTask(reply, mapf, reducef)
 			CallBackTask(workID, reply.TaskID, 0)
 		} else if reply.Type == -1 {
-			fmt.Printf("All Task is finished\n")
+			log.Printf("All Task is finished, break\n")
 			break
 		} else if reply.Type == -2 {
-			fmt.Printf("All Task is running\n")
+			log.Printf("Fetch null, All Task is running\n")
 		} else {
 			log.Fatalf("unknown task type: %d\n", reply.Type)
 		}
@@ -106,15 +107,16 @@ func ExecTask(reply *TaskReply, mapf func(string, string) []KeyValue,
 		}
 		break
 	case 1:
-		oname := fmt.Sprintf("out-%v", reply.TaskID)
+		oname := fmt.Sprintf("mr-out-%v", reply.TaskID)
 		ofile, _ := os.Create(oname)
+		intermediate := []KeyValue{}
+		// how may maps
 		for k := 0; k < reply.TotalInputFileNums; k++ {
 			iname := fmt.Sprintf("out-%v-%v", k, reply.TaskID)
 			file, _ := os.Open(iname)
 			defer file.Close()
-
 			scanner := bufio.NewScanner(file)
-			intermediate := []KeyValue{}
+
 			for scanner.Scan() {
 				var kv KeyValue
 				line := scanner.Text()
@@ -124,21 +126,21 @@ func ExecTask(reply *TaskReply, mapf func(string, string) []KeyValue,
 				}
 				intermediate = append(intermediate, kv)
 			}
-
-			i := 0
-			for i < len(intermediate) {
-				j := i + 1
-				for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
-					j++
-				}
-				values := []string{}
-				for k := i; k < j; k++ {
-					values = append(values, intermediate[k].Value)
-				}
-				output := reducef(intermediate[i].Key, values)
-				fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, output)
-				i = j
+		}
+		sort.Sort(ByKey(intermediate))
+		i := 0
+		for i < len(intermediate) {
+			j := i + 1
+			for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
+				j++
 			}
+			values := []string{}
+			for k := i; k < j; k++ {
+				values = append(values, intermediate[k].Value)
+			}
+			output := reducef(intermediate[i].Key, values)
+			fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, output)
+			i = j
 		}
 		ofile.Close()
 		break
@@ -148,7 +150,7 @@ func ExecTask(reply *TaskReply, mapf func(string, string) []KeyValue,
 
 }
 
-func CallFetchTask(workID int) *TaskReply {
+func CallFetchTask(workID string) *TaskReply {
 	args := TaskArgs{WorkerID: workID}
 	reply := TaskReply{}
 
@@ -162,7 +164,7 @@ func CallFetchTask(workID int) *TaskReply {
 
 }
 
-func CallBackTask(workID int, taskID int, status int) *CallBackReply {
+func CallBackTask(workID string, taskID int, status int) *CallBackReply {
 	args := CallBackArgs{
 		WorkerID: workID,
 		TaskID:   taskID,

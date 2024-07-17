@@ -3,6 +3,8 @@ package mr
 import (
 	"fmt"
 	"log"
+	"sync/atomic"
+	"time"
 )
 import "net"
 import "os"
@@ -13,10 +15,10 @@ import "sync"
 type Coordinator struct {
 	// Your definitions here.
 	mapTask      *Queue
-	mapCt        int
+	mapCt        int32
 	reduceTask   *Queue
-	reduceCt     int
-	workIdToTask sync.Map
+	reduceCt     int32
+	workIdToTask sync.Map // int -> TaskReply
 	ret          bool
 }
 
@@ -36,8 +38,9 @@ func (c *Coordinator) initMapTask(files []string, nReduce int) {
 			BucketNums:     nReduce,
 			InputFileNames: []string{file},
 		})
-		c.mapCt++
+		atomic.AddInt32(&c.mapCt, 1)
 	}
+	log.Printf("init map task finished: %v", c.mapCt)
 }
 
 func (c *Coordinator) initReduceTask(files []string, nReduce int) {
@@ -47,54 +50,61 @@ func (c *Coordinator) initReduceTask(files []string, nReduce int) {
 			TaskID:             i,
 			TotalInputFileNums: len(files), // reade out-x-ID  0 <= x < InputFileSize
 		})
-		c.reduceCt++
+		atomic.AddInt32(&c.reduceCt, 1)
 	}
+	log.Printf("init reduce task finished: %v", c.reduceCt)
 }
 
 //	rpc call
 //
 // first fetch Map, if finished fetch Reduce
 func (c *Coordinator) FetchTask(args *TaskArgs, reply *TaskReply) error {
-	log.Printf("FetchTask(%v)", *args)
+	log.Printf("Receive FetchTask(%v)", *args)
 
 	//	*reply = *c.finishedFlagTask
 
 	if !c.mapTask.Empty() {
 		task, ok := c.mapTask.Dequeue().(*TaskReply)
+		task.DispatchTime = time.Now()
 		if !ok {
 			fmt.Printf("err type of map task dequeue")
 			return nil
 		}
 		// todo need a atomic
+		// todo too time not return
 		*reply = *task
 		c.workIdToTask.Store(args.WorkerID, reply)
-		c.workIdToTask.Range(func(workID, taskReply interface{}) bool {
-			log.Printf("Worker ID: %d, Task Reply: %+v\n", workID, taskReply)
-			return true
-
-		})
+		//c.workIdToTask.Range(func(workID, taskReply interface{}) bool {
+		//	log.Printf("Worker ID: %d, Task Reply: %+v\n", workID, taskReply)
+		//	return true
+		//
+		//})
+		log.Printf("Receive FetchTask(%v), fetch a map task: %v", args, reply)
 		return nil
 	}
 
 	if c.mapCt > 0 {
 		// map not complete finished but queue is empty
 		*reply = NilFlagTaskReply
+		log.Printf("Receive FetchTask(%v), All map is dispatch but not finish, mapCt %d", args, c.mapCt)
 		return nil
 	}
 
 	if !c.reduceTask.Empty() {
 		task, ok := c.reduceTask.Dequeue().(*TaskReply)
+		task.DispatchTime = time.Now()
 		if !ok {
 			fmt.Printf("err type of reduce task dequeue")
 			return nil
 		}
 		*reply = *task
 		c.workIdToTask.Store(args.WorkerID, reply)
-		c.workIdToTask.Range(func(workID, taskReply interface{}) bool {
-			log.Printf("Worker ID: %d, Task Reply: %+v\n", workID, taskReply)
-			return true
-
-		})
+		//c.workIdToTask.Range(func(workID, taskReply interface{}) bool {
+		//	log.Printf("Worker ID: %d, Task Reply: %+v\n", workID, taskReply)
+		//	return true
+		//
+		//})
+		log.Printf("Receive FetchTask(%v), fetch a reduce task: %v", args, reply)
 		return nil
 	}
 	log.Printf("FetchTask(%v), all task is finished", *args)
@@ -104,13 +114,14 @@ func (c *Coordinator) FetchTask(args *TaskArgs, reply *TaskReply) error {
 
 // call back finished
 func (c *Coordinator) CallBackTask(args *CallBackArgs, reply *CallBackReply) error {
+	log.Printf("Receive CallBackTask(%v), It's finished", *args)
 
 	workID := args.WorkerID
 
 	// todo check status
 	taskInterface, ok := c.workIdToTask.Load(workID)
 	if !ok {
-		log.Printf("Worker ID: %d not found\n", workID)
+		log.Printf("Worker ID: %d not found, CallBackArgs: %v \n", workID, args)
 		*reply = CallBackReply{
 			Status: -1,
 		}
@@ -118,9 +129,9 @@ func (c *Coordinator) CallBackTask(args *CallBackArgs, reply *CallBackReply) err
 		c.workIdToTask.Delete(workID)
 		task, _ := taskInterface.(*TaskReply)
 		if task.Type == 0 {
-			c.mapCt--
+			atomic.AddInt32(&c.mapCt, -1)
 		} else {
-			c.reduceCt--
+			atomic.AddInt32(&c.reduceCt, -1)
 		}
 		log.Printf("Remove Worker ID: %d, task: %+v, mapCt: %d, reduceCt: %d\n", workID, task, c.mapCt, c.reduceCt)
 		// call to set finished status
@@ -192,5 +203,36 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	// 拆分任务
 
 	c.server()
+	go func() {
+
+		log.Printf("start coordinator timeout checker")
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				c.workIdToTask.Range(func(workID, taskReply interface{}) bool {
+					task := taskReply.(*TaskReply)
+					log.Printf("TimeOut check, Worker ID: %v, Task Reply: %+v\n", workID, taskReply)
+					if time.Since(task.DispatchTime) > 10*time.Second {
+						log.Printf("task %v is time out\n", task)
+						c.workIdToTask.Delete(workID)
+						switch task.Type {
+						case 0:
+							task.DispatchTime = time.Now()
+							c.mapTask.Enqueue(task)
+							log.Printf("reset map task %v, mapTask queue size: %d \n", task, c.mapTask.Len())
+						case 1:
+							task.DispatchTime = time.Now()
+							c.reduceTask.Enqueue(task)
+							log.Printf("reset reduce task %v, reduceTask queue size: %d \n", task, c.reduceTask.Len())
+						}
+					}
+					return true
+				})
+			}
+		}
+	}()
+
 	return &c
 }
