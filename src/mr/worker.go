@@ -99,7 +99,6 @@ func ExecTask(reply *TaskReply, mapf func(string, string) []KeyValue,
 			sort.Sort(ByKey(kvs))
 			oname := fmt.Sprintf("out-%v-%v", reply.TaskID, idx)
 			ofile, _ := os.Create(oname)
-			// todo compact
 			for _, kv := range kvs {
 				fmt.Fprintf(ofile, "%v %v\n", kv.Key, kv.Value)
 			}

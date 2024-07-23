@@ -60,9 +60,6 @@ func (c *Coordinator) initReduceTask(files []string, nReduce int) {
 // first fetch Map, if finished fetch Reduce
 func (c *Coordinator) FetchTask(args *TaskArgs, reply *TaskReply) error {
 	log.Printf("Receive FetchTask(%v)", *args)
-
-	//	*reply = *c.finishedFlagTask
-
 	if !c.mapTask.Empty() {
 		task, ok := c.mapTask.Dequeue().(*TaskReply)
 		task.DispatchTime = time.Now()
@@ -70,15 +67,8 @@ func (c *Coordinator) FetchTask(args *TaskArgs, reply *TaskReply) error {
 			fmt.Printf("err type of map task dequeue")
 			return nil
 		}
-		// todo need a atomic
-		// todo too time not return
 		*reply = *task
 		c.workIdToTask.Store(args.WorkerID, reply)
-		//c.workIdToTask.Range(func(workID, taskReply interface{}) bool {
-		//	log.Printf("Worker ID: %d, Task Reply: %+v\n", workID, taskReply)
-		//	return true
-		//
-		//})
 		log.Printf("Receive FetchTask(%v), fetch a map task: %v", args, reply)
 		return nil
 	}
@@ -99,11 +89,6 @@ func (c *Coordinator) FetchTask(args *TaskArgs, reply *TaskReply) error {
 		}
 		*reply = *task
 		c.workIdToTask.Store(args.WorkerID, reply)
-		//c.workIdToTask.Range(func(workID, taskReply interface{}) bool {
-		//	log.Printf("Worker ID: %d, Task Reply: %+v\n", workID, taskReply)
-		//	return true
-		//
-		//})
 		log.Printf("Receive FetchTask(%v), fetch a reduce task: %v", args, reply)
 		return nil
 	}
@@ -157,16 +142,6 @@ func (c *Coordinator) hasRunningTask() bool {
 	return !empty
 }
 
-// Your code here -- RPC handlers for the worker to call.
-
-// an example RPC handler.
-//
-// the RPC argument and reply types are defined in rpc.go.
-func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
-	reply.Y = args.X + 1
-	return nil
-}
-
 // start a thread that listens for RPCs from worker.go
 func (c *Coordinator) server() {
 	rpc.Register(c)
@@ -199,9 +174,6 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 
 	c.initMapTask(files, nReduce)
 	c.initReduceTask(files, nReduce)
-	// Your code here.
-	// 拆分任务
-
 	c.server()
 	go func() {
 
