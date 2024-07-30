@@ -1,12 +1,17 @@
 package kvsrv
 
-import "6.5840/labrpc"
+import (
+	"6.5840/labrpc"
+	"log"
+)
 import "crypto/rand"
 import "math/big"
 
 type Clerk struct {
 	server *labrpc.ClientEnd
 	// You will have to modify this struct.
+	id         int64
+	sequenceId int64
 }
 
 func nrand() int64 {
@@ -20,6 +25,8 @@ func MakeClerk(server *labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.server = server
 	// You'll have to add code here.
+	ck.id = nrand()
+	ck.sequenceId = 0
 	return ck
 }
 
@@ -35,10 +42,15 @@ func MakeClerk(server *labrpc.ClientEnd) *Clerk {
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) Get(key string) string {
 	args := GetArgs{
-		Key: key,
+		Key:        key,
+		ClientId:   ck.id,
+		SequenceId: ck.sequenceId,
 	}
+	ck.sequenceId++
 	reply := GetReply{}
-	ck.server.Call("KVServer.Get", &args, &reply)
+	for !ck.server.Call("KVServer.Get", &args, &reply) {
+		//	log.Printf("try to get key %s from server", key)
+	}
 
 	return reply.Value
 }
@@ -53,11 +65,16 @@ func (ck *Clerk) Get(key string) string {
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) PutAppend(key string, value string, op string) string {
 	args := PutAppendArgs{
-		Key:   key,
-		Value: value,
+		Key:        key,
+		Value:      value,
+		ClientId:   ck.id,
+		SequenceId: ck.sequenceId,
 	}
+	ck.sequenceId++
 	reply := PutAppendReply{}
-	ck.server.Call("KVServer."+op, &args, &reply)
+	for !ck.server.Call("KVServer."+op, &args, &reply) {
+		log.Printf("try to put key %s to server", key)
+	}
 	return reply.Value
 }
 
