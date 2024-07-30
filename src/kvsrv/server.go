@@ -17,8 +17,9 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 type KVServer struct {
 	mu sync.Mutex
 
-	data         map[string]string
-	requestCache map[int64]map[int64]*string
+	data         map[string]*string
+	clientMap    map[int64]int
+	requestCache map[int64]string
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
@@ -26,14 +27,13 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	defer kv.mu.Unlock()
 	clientId := args.ClientId
 	sequenceId := args.SequenceId
-	if kv.requestCache[clientId] != nil && kv.requestCache[clientId][sequenceId] != nil {
-		reply.Value = *kv.requestCache[clientId][sequenceId]
+	if kv.clientMap[clientId] == 0 || sequenceId > kv.clientMap[clientId] {
+		reply.Value = *kv.data[args.Key]
+		kv.requestCache[clientId] = reply.Value
+		kv.clientMap[clientId] = sequenceId
 	} else {
-		reply.Value = kv.data[args.Key]
-		if kv.requestCache[clientId] == nil {
-			kv.requestCache[clientId] = make(map[int64]*string)
-		}
-		kv.requestCache[clientId][sequenceId] = &reply.Value
+		reply.Value = kv.requestCache[clientId]
+		delete(kv.requestCache, clientId)
 	}
 }
 
@@ -42,17 +42,18 @@ func (kv *KVServer) Put(args *PutAppendArgs, reply *PutAppendReply) {
 	defer kv.mu.Unlock()
 	clientId := args.ClientId
 	sequenceId := args.SequenceId
-	if kv.requestCache[clientId] != nil && kv.requestCache[clientId][sequenceId] != nil {
-		reply.Value = *kv.requestCache[clientId][sequenceId]
-	} else {
-		oldValue := kv.data[args.Key]
-		kv.data[args.Key] = args.Value
-		reply.Value = oldValue
-		if kv.requestCache[clientId] == nil {
-			kv.requestCache[clientId] = make(map[int64]*string)
+	if kv.clientMap[clientId] == 0 || sequenceId > kv.clientMap[clientId] {
+		oldValue := ""
+		if kv.data[args.Key] != nil {
+			oldValue = *kv.data[args.Key]
 		}
-		value, _ := kv.data[args.Key]
-		kv.requestCache[clientId][sequenceId] = &value
+		kv.data[args.Key] = &args.Value
+		reply.Value = oldValue
+		kv.requestCache[clientId] = args.Value
+		kv.clientMap[clientId] = sequenceId
+	} else {
+		reply.Value = kv.requestCache[clientId]
+		delete(kv.requestCache, clientId)
 	}
 
 }
@@ -62,24 +63,28 @@ func (kv *KVServer) Append(args *PutAppendArgs, reply *PutAppendReply) {
 	defer kv.mu.Unlock()
 	clientId := args.ClientId
 	sequenceId := args.SequenceId
-	if kv.requestCache[clientId] != nil && kv.requestCache[clientId][sequenceId] != nil {
-		reply.Value = *kv.requestCache[clientId][sequenceId]
-	} else {
-		oldValue := kv.data[args.Key]
-		kv.data[args.Key] = oldValue + args.Value
-		reply.Value = oldValue
-		if kv.requestCache[clientId] == nil {
-			kv.requestCache[clientId] = make(map[int64]*string)
+	if kv.clientMap[clientId] == 0 || sequenceId > kv.clientMap[clientId] {
+		oldValue := ""
+		if kv.data[args.Key] != nil {
+			oldValue = *kv.data[args.Key]
 		}
-		kv.requestCache[clientId][sequenceId] = &oldValue
+		newValue := oldValue + args.Value
+		kv.data[args.Key] = &newValue
+		reply.Value = oldValue
+		kv.requestCache[clientId] = oldValue
+		kv.clientMap[clientId] = sequenceId
+	} else {
+		reply.Value = kv.requestCache[clientId]
+		delete(kv.requestCache, clientId)
 	}
 
 }
 
 func StartKVServer() *KVServer {
 	kv := &KVServer{
-		data:         make(map[string]string),
-		requestCache: make(map[int64]map[int64]*string),
+		data:         make(map[string]*string),
+		clientMap:    make(map[int64]int),
+		requestCache: make(map[int64]string),
 	}
 	return kv
 }

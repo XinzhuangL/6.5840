@@ -2,7 +2,6 @@ package kvsrv
 
 import (
 	"6.5840/labrpc"
-	"log"
 )
 import "crypto/rand"
 import "math/big"
@@ -11,7 +10,7 @@ type Clerk struct {
 	server *labrpc.ClientEnd
 	// You will have to modify this struct.
 	id         int64
-	sequenceId int64
+	sequenceId int
 }
 
 func nrand() int64 {
@@ -73,7 +72,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) string {
 	ck.sequenceId++
 	reply := PutAppendReply{}
 	for !ck.server.Call("KVServer."+op, &args, &reply) {
-		log.Printf("try to put key %s to server", key)
+		//log.Printf("try to put key %s to server", key)
 	}
 	return reply.Value
 }
