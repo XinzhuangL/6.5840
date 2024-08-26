@@ -375,6 +375,7 @@ func (rf *Raft) ticker() {
 		// Your code here (3A)
 		// Check if a leader election should be started.
 		// check role
+		// heartbeat less than 5 times per second
 		if Leader == rf.role {
 			rf.printKeyInfo("trick to leader")
 			// send heartbeat
@@ -385,7 +386,7 @@ func (rf *Raft) ticker() {
 				rf.printKeyInfo("try to send heart to " + strconv.Itoa(i))
 				reply := &AppendEntriesReply{}
 				rf.sendHeartbeat(i, reply)
-				// if reply == false web need change role
+				// if reply == false we need change role
 				if !reply.Success {
 					rf.mu.Lock()
 					if reply.Term > rf.currentTerm {
@@ -398,20 +399,20 @@ func (rf *Raft) ticker() {
 				}
 			}
 			// sleep
-			time.Sleep(time.Millisecond * 5)
+			time.Sleep(time.Millisecond * 100)
 		} else if Follower == rf.role {
 			rf.printKeyInfo("trick to follow")
 			// check heartbeat timeout
-			if time.Now().Sub(rf.lastHeartbeatTime) > time.Millisecond*300 {
+			if time.Now().Sub(rf.lastHeartbeatTime) > time.Millisecond*150 {
 				/*
 					随机开始选举时间
 				*/
-				ms := 50 + (rand.Int63() % 20)
+				ms := 150 + (rand.Int63() % 150)
 				time.Sleep(time.Duration(ms) * time.Millisecond)
 				// change to candidate and start a election
 				rf.mu.Lock()
 				rf.printKeyInfo("start to elect leader")
-				if time.Now().Sub(rf.lastHeartbeatTime) <= time.Millisecond*300 {
+				if time.Now().Sub(rf.lastHeartbeatTime) <= time.Millisecond*150 {
 					// have a new leader
 					rf.mu.Unlock()
 					rf.printKeyInfo("have a new leader")
@@ -426,11 +427,11 @@ func (rf *Raft) ticker() {
 				rf.requestVotes()
 
 			} else {
-				time.Sleep(time.Millisecond * 5)
+				time.Sleep(time.Millisecond * 100)
 			}
 		} else if Candidate == rf.role {
 			rf.printKeyInfo("trick to candidate")
-			ms := 50 + (rand.Int63() % 300)
+			ms := 150 + (rand.Int63() % 150)
 			// check election time out
 			/*
 				随机选举超时时间
