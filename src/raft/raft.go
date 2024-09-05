@@ -18,7 +18,6 @@ package raft
 //
 
 import (
-	"log"
 	"strconv"
 
 	//	"bytes"
@@ -82,32 +81,31 @@ type Raft struct {
 	log         []LogEntity
 
 	// Volatile state on all servers
-	commitIndex int
-	lastApplied int
+	commitIndex int // 最新的已知已经被提交的日志索引(添加到[])
+	lastApplied int // 最新的被应用于状态机的日志索引(应用到状态机)
 
 	// Volatile state on leader
-	nextIndex  []int
-	matchIndex []int
+	nextIndex  []int // leader发个每个server最后日志对象的索引 (初始化为leader上一个日志索引+1)
+	matchIndex []int // 已知的已经被复制的最高的日志对象索引(初始化为0，单调递增)
 }
 
 type AppendEntriesArgs struct {
-	Term              int
-	LeaderId          int
-	PrevLogIndex      int
-	PrevLogTerm       int
-	Entries           []LogEntity
-	LeaderCommitIndex int
+	Term              int         // leader任期
+	LeaderId          int         // leaderId
+	PrevLogIndex      int         // 上一个日志条目的索引
+	PrevLogTerm       int         // 上一个日志条目的任期  用于一致性比对
+	Entries           []LogEntity // append的日志条目，可以一次发送多个
+	LeaderCommitIndex int         // 最新的leader已经被提交的日志索引
 }
 
 type AppendEntriesReply struct {
-	Term    int
-	Success bool
+	Term    int  // 当前任期，如果大于leader任期，当前leader转变为follower
+	Success bool // 是否成功，是否匹配prevLogIndex和prevLogTerm
 }
 
 type LogEntity struct {
-	Key   string
-	Value string
-	Term  int
+	command interface{}
+	Term    int
 }
 
 // return currentTerm and whether this server
@@ -274,11 +272,22 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 
 // AppendEntries RPC handler
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	/*
-		接受远端添加日志的请求
-		需要term 大于当前term
+	/* 3A
+	接受远端添加日志的请求
+	需要term 大于当前term
+	如果是心跳请求 需要更新最后接收到心跳的时间，需要更新当前任期，如果当前角色为leader 还需要转变为follower
+	*/
+	// todo impl this in 3B
+	/* 3B
+	1. if term < currentTerm return false
+	2. if PrevLogIndex != this.log.PreLogIndex || PrevLogTerm != this.log.PrevLogTerm return false
+	3. if PreLogIndex = this.log.PreLogIndex && PreLogTerm > this.log.PrevLogTerm append new
+	4. append not exist
+	5. if leaderCommit > commitIndex set commitIndex = min(leaderCommit, index of last new entry)
 
-		如果是心跳请求 需要更新最后接收到心跳的时间，需要更新当前任期，如果当前角色为leader 还需要转变为follower
+	client request Or leader request
+
+
 	*/
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -300,6 +309,38 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// other impl
 }
 
+// multiple send log
+// todo serial now
+func (rf *Raft) multipleReplicaLog(startIdx int, endIdx int) {
+	// save args & reply
+	idToArgs := make(map[int]*AppendEntriesArgs)
+	idToReply := make(map[int]*AppendEntriesReply)
+
+	for i := 0; i < len(rf.peers); i++ {
+		if i == rf.me {
+			continue
+		}
+		subNewEntries := rf.log[startIdx : endIdx+1]
+		newEntries := make([]LogEntity, len(subNewEntries))
+		copy(newEntries, subNewEntries)
+		args := &AppendEntriesArgs{
+			Term:              rf.currentTerm,
+			LeaderId:          rf.me,
+			PrevLogIndex:      rf.getLastLogIndex(),
+			PrevLogTerm:       rf.getLastLogTerm(),
+			Entries:           newEntries,
+			LeaderCommitIndex: rf.getLastLogIndex(),
+		}
+		reply := &AppendEntriesReply{}
+		rf.sendReplicaLog(i, args, reply)
+		idToArgs[i] = args
+		idToReply[i] = reply
+	}
+	// todo maybe failed
+
+}
+
+// heartbeat
 func (rf *Raft) sendHeartbeat(server int, reply *AppendEntriesReply) bool {
 	args := &AppendEntriesArgs{
 		Term:              rf.currentTerm,
@@ -310,6 +351,11 @@ func (rf *Raft) sendHeartbeat(server int, reply *AppendEntriesReply) bool {
 		LeaderCommitIndex: rf.commitIndex,
 	}
 	return rf.sendAppendEntries(server, args, reply)
+}
+
+// replica log
+func (rf *Raft) sendReplicaLog(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
@@ -331,13 +377,48 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 // term. the third return value is true if this server believes it is
 // the leader.
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
+	index := rf.getLastLogIndex() + 1
+	term := rf.currentTerm
+	isLeader := rf.role == Leader
+	if !isLeader {
+		return index, term, isLeader
+	}
 
 	// Your code here (3B).
+	// 在这里处理客户端请求的命令
+	// 需要完成完整的请求流程
+	// 1. 接受请求
+	// leader从client接收到包含新的日志条目的请求
+	log := &LogEntity{
+		command: command,
+		Term:    term,
+	}
 
-	return index, term, isLeader
+	// todo 需要lock嘛
+	// 2.添加条目到本地log
+	// leader将这个新的日志条目添加到本地，赋予它当前term和一个连续的index
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	rf.log = append(rf.log, *log)
+
+	// 3.发送AppendEntries RPC
+	// leader像所有其他节点发送一个AppendEntriesRPC，请求他们复制这个新的日志条目
+	// multiple rpc to all follower
+
+	// 4.等待大多数节点响应
+	// leader等待大多数节点响应AppendEntries RPC，表是follower已将其复制到本地的日志条目中
+
+	// 5.更新commitIndex
+	// leader收到大多数节点的成功响应后，更新自己的commitIndex，反应最新提交的日志条目
+
+	// 6. 更新条目到状态机
+	// leader将commitIndex之前所有的日志条目，应用到自己的状态机种。顺序执行，并且更新lastApplied
+
+	// 7. 响应客户端请求
+
+	// 7.发送心跳
+	// leader定期发送心跳信息，让其他节点知道最新的commitIndex
+
 }
 
 // the tester doesn't halt goroutines created by Raft after each test,
@@ -448,18 +529,18 @@ func (rf *Raft) ticker() {
 }
 
 func (rf *Raft) printKeyInfo(appendInfo string) {
-	strRole := ""
-	if rf.role == 0 {
-		strRole = "LEADER"
-	}
-	if rf.role == 1 {
-		strRole = "FOLLOWER"
-	}
-	if rf.role == 2 {
-		strRole = "CANDIDATE"
-	}
+	//strRole := ""
+	//if rf.role == 0 {
+	//	strRole = "LEADER"
+	//}
+	//if rf.role == 1 {
+	//	strRole = "FOLLOWER"
+	//}
+	//if rf.role == 2 {
+	//	strRole = "CANDIDATE"
+	//}
 
-	log.Printf("raft id: %d, term: %d, role: %s, info: %s", rf.me, rf.currentTerm, strRole, appendInfo)
+	// log.Printf("raft id: %d, term: %d, role: %s, info: %s", rf.me, rf.currentTerm, strRole, appendInfo)
 }
 
 func (rf *Raft) requestVotes() {
