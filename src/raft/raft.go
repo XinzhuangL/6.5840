@@ -295,8 +295,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.Success = false
+		return
 	}
 	if args.Entries == nil {
+		// todo include commitIndex, use it to apply
 		// heartbeat
 		rf.lastHeartbeatTime = time.Now()
 		if args.Term > rf.currentTerm {
@@ -305,13 +307,49 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 		rf.currentTerm = args.Term
 		rf.printKeyInfo("receive a heart " + rf.lastHeartbeatTime.String())
+	} else {
+		preLogIndex := rf.getLastLogIndex()
+		preLogTerm := rf.getLastLogTerm()
+		// 2. if PrevLogIndex != this.log.PreLogIndex || PrevLogTerm != this.log.PrevLogTerm return false
+		if preLogIndex != rf.getLastLogIndex() || preLogTerm != rf.getLastLogTerm() {
+			reply.Term = rf.currentTerm
+			reply.Success = false
+			return
+		}
+		// 3. if PreLogIndex = this.log.PreLogIndex && PreLogTerm > this.log.PrevLogTerm append new
+		if preLogIndex == rf.getLastLogIndex() && preLogTerm > rf.getLastLogTerm() {
+			// todo process once only
+			reply.Term = rf.currentTerm
+			reply.Success = true
+			rf.log[rf.getLastLogIndex()] = args.Entries[len(args.Entries)-1]
+			return
+		}
+		// 4. append not exists
+		logs := args.Entries
+		for i := 0; i < len(logs); i++ {
+			rf.log = append(rf.log, logs[i])
+		}
+		reply.Success = true
+		reply.Term = rf.currentTerm
+		// 5. if leaderCommit > commitIndex set commitIndex = min(leaderCommit, index of last new entry)
+		if args.LeaderCommitIndex > rf.commitIndex {
+			rf.commitIndex = min(args.LeaderCommitIndex, rf.getLastLogIndex())
+		}
+
 	}
 	// other impl
 }
 
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 // multiple send log
 // todo serial now
-func (rf *Raft) multipleReplicaLog(startIdx int, endIdx int) {
+func (rf *Raft) multipleReplicaLog(startIdx int, endIdx int) (map[int]*AppendEntriesArgs, map[int]*AppendEntriesReply) {
 	// save args & reply
 	idToArgs := make(map[int]*AppendEntriesArgs)
 	idToReply := make(map[int]*AppendEntriesReply)
@@ -332,12 +370,12 @@ func (rf *Raft) multipleReplicaLog(startIdx int, endIdx int) {
 			LeaderCommitIndex: rf.getLastLogIndex(),
 		}
 		reply := &AppendEntriesReply{}
-		rf.sendReplicaLog(i, args, reply)
+		rf.sendAppendEntries(i, args, reply)
 		idToArgs[i] = args
 		idToReply[i] = reply
 	}
 	// todo maybe failed
-
+	return idToArgs, idToReply
 }
 
 // heartbeat
@@ -354,9 +392,9 @@ func (rf *Raft) sendHeartbeat(server int, reply *AppendEntriesReply) bool {
 }
 
 // replica log
-func (rf *Raft) sendReplicaLog(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
-
-}
+//func (rf *Raft) sendReplicaLog(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+//
+//}
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	rf.printKeyInfo("send heart to id: " + strconv.Itoa(server) + ", args.LeaderId: " + strconv.Itoa(args.LeaderId) + ", args.Term: " + strconv.Itoa(args.Term))
@@ -404,20 +442,26 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// 3.发送AppendEntries RPC
 	// leader像所有其他节点发送一个AppendEntriesRPC，请求他们复制这个新的日志条目
 	// multiple rpc to all follower
+	// todo current last one
+	args, replys := rf.multipleReplicaLog(rf.getLastLogIndex(), rf.getLastLogIndex())
+
+	// current serial exec will block
 
 	// 4.等待大多数节点响应
-	// leader等待大多数节点响应AppendEntries RPC，表是follower已将其复制到本地的日志条目中
+	// leader等待大多数节点响应AppendEntries RPC，表示follower已将其复制到本地的日志条目中
 
 	// 5.更新commitIndex
 	// leader收到大多数节点的成功响应后，更新自己的commitIndex，反应最新提交的日志条目
+	rf.commitIndex = rf.getLastLogIndex()
 
 	// 6. 更新条目到状态机
-	// leader将commitIndex之前所有的日志条目，应用到自己的状态机种。顺序执行，并且更新lastApplied
+	// leader将commitIndex之前所有的日志条目，应用到自己的状态机中。顺序执行，并且更新lastApplied
+	// todo apply
+	// from lastApplied -> rf.commitIndex
+	rf.lastApplied = rf.commitIndex
 
 	// 7. 响应客户端请求
-
-	// 7.发送心跳
-	// leader定期发送心跳信息，让其他节点知道最新的commitIndex
+	return index, term, isLeader
 
 }
 
