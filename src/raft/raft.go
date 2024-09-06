@@ -18,6 +18,7 @@ package raft
 //
 
 import (
+	"log"
 	"strconv"
 
 	//	"bytes"
@@ -79,6 +80,8 @@ type Raft struct {
 	currentTerm int
 	votedFor    int
 	log         []LogEntity
+
+	stateMatch interface{}
 
 	// Volatile state on all servers
 	commitIndex int // 最新的已知已经被提交的日志索引(添加到[])
@@ -349,8 +352,37 @@ func min(a, b int) int {
 
 // multiple send log
 // todo serial now
-func (rf *Raft) multipleReplicaLog(startIdx int, endIdx int) (map[int]*AppendEntriesArgs, map[int]*AppendEntriesReply) {
-	// save args & reply
+//func (rf *Raft) multipleReplicaLog(startIdx int, endIdx int) (map[int]*AppendEntriesArgs, map[int]*AppendEntriesReply) {
+//	// save args & reply
+//	idToArgs := make(map[int]*AppendEntriesArgs)
+//	idToReply := make(map[int]*AppendEntriesReply)
+//
+//	for i := 0; i < len(rf.peers); i++ {
+//		if i == rf.me {
+//			continue
+//		}
+//		subNewEntries := rf.log[startIdx : endIdx+1]
+//		newEntries := make([]LogEntity, len(subNewEntries))
+//		copy(newEntries, subNewEntries)
+//		args := &AppendEntriesArgs{
+//			Term:              rf.currentTerm,
+//			LeaderId:          rf.me,
+//			PrevLogIndex:      rf.getLastLogIndex(),
+//			PrevLogTerm:       rf.getLastLogTerm(),
+//			Entries:           newEntries,
+//			LeaderCommitIndex: rf.getLastLogIndex(),
+//		}
+//		reply := &AppendEntriesReply{}
+//		rf.sendAppendEntries(i, args, reply)
+//		idToArgs[i] = args
+//		idToReply[i] = reply
+//	}
+//	// todo maybe failed
+//	return idToArgs, idToReply
+//}
+
+// todo replicaOne
+func (rf *Raft) multipleReplicaLon(index int) (map[int]*AppendEntriesArgs, map[int]*AppendEntriesReply) {
 	idToArgs := make(map[int]*AppendEntriesArgs)
 	idToReply := make(map[int]*AppendEntriesReply)
 
@@ -358,24 +390,74 @@ func (rf *Raft) multipleReplicaLog(startIdx int, endIdx int) (map[int]*AppendEnt
 		if i == rf.me {
 			continue
 		}
-		subNewEntries := rf.log[startIdx : endIdx+1]
-		newEntries := make([]LogEntity, len(subNewEntries))
-		copy(newEntries, subNewEntries)
-		args := &AppendEntriesArgs{
-			Term:              rf.currentTerm,
-			LeaderId:          rf.me,
-			PrevLogIndex:      rf.getLastLogIndex(),
-			PrevLogTerm:       rf.getLastLogTerm(),
-			Entries:           newEntries,
-			LeaderCommitIndex: rf.getLastLogIndex(),
-		}
-		reply := &AppendEntriesReply{}
-		rf.sendAppendEntries(i, args, reply)
-		idToArgs[i] = args
-		idToReply[i] = reply
+		idToArgs[i], idToReply[i] = rf.replicaLog(i, index)
 	}
-	// todo maybe failed
+
 	return idToArgs, idToReply
+}
+
+func (rf *Raft) asyncMultipleReplicaLog(index int) (chan result, chan error) {
+	results := make(chan result, len(rf.peers)-1)
+	errors := make(chan error, len(rf.peers)-1)
+
+	for i := 0; i < len(rf.peers); i++ {
+		if i == rf.me {
+			continue
+		}
+
+		go func(server int) {
+			args, reply := rf.replicaLog(server, index)
+			results <- result{rf.me, args, reply}
+			errors <- nil
+		}(i)
+	}
+
+	// clear
+	go func() {
+		var wg sync.WaitGroup
+		wg.Add(len(rf.peers) - 1)
+
+		for i := 0; i < len(rf.peers); i++ {
+			if i == rf.me {
+				continue
+			}
+			go func() {
+				defer wg.Done()
+				<-errors
+			}()
+
+			go func() {
+				defer wg.Done()
+				<-results
+			}()
+		}
+		wg.Wait()
+		close(results)
+		close(errors)
+	}()
+	return results, errors
+}
+
+type result struct {
+	server      int
+	appendArgs  *AppendEntriesArgs
+	appendReply *AppendEntriesReply
+}
+
+func (rf *Raft) replicaLog(server int, index int) (*AppendEntriesArgs, *AppendEntriesReply) {
+	entity := rf.log[index]
+	args := &AppendEntriesArgs{
+		Term:              rf.currentTerm,
+		LeaderId:          rf.me,
+		PrevLogIndex:      rf.getLastLogIndex(),
+		PrevLogTerm:       rf.getLastLogTerm(),
+		Entries:           []LogEntity{entity},
+		LeaderCommitIndex: rf.getLastLogIndex(),
+	}
+
+	reply := &AppendEntriesReply{}
+	rf.sendAppendEntries(server, args, reply)
+	return args, reply
 }
 
 // heartbeat
@@ -427,7 +509,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// 需要完成完整的请求流程
 	// 1. 接受请求
 	// leader从client接收到包含新的日志条目的请求
-	log := &LogEntity{
+	entry := &LogEntity{
 		command: command,
 		Term:    term,
 	}
@@ -437,18 +519,34 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// leader将这个新的日志条目添加到本地，赋予它当前term和一个连续的index
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	rf.log = append(rf.log, *log)
+	rf.log = append(rf.log, *entry)
 
 	// 3.发送AppendEntries RPC
 	// leader像所有其他节点发送一个AppendEntriesRPC，请求他们复制这个新的日志条目
 	// multiple rpc to all follower
-	// todo current last one
-	args, replys := rf.multipleReplicaLog(rf.getLastLogIndex(), rf.getLastLogIndex())
 
-	// current serial exec will block
+	// todo current last one
+	results, _ := rf.asyncMultipleReplicaLog(rf.getLastLogIndex())
+	// todo failed need to recover
 
 	// 4.等待大多数节点响应
 	// leader等待大多数节点响应AppendEntries RPC，表示follower已将其复制到本地的日志条目中
+	i := 0
+	isSuccess := false
+	for each := range results {
+		if each.appendReply.Success {
+			i++
+			if i >= len(rf.peers) {
+				isSuccess = true
+				break
+			}
+		}
+	}
+
+	if !isSuccess {
+		log.Printf(" start command error")
+		return index, term, isLeader
+	}
 
 	// 5.更新commitIndex
 	// leader收到大多数节点的成功响应后，更新自己的commitIndex，反应最新提交的日志条目
@@ -456,8 +554,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	// 6. 更新条目到状态机
 	// leader将commitIndex之前所有的日志条目，应用到自己的状态机中。顺序执行，并且更新lastApplied
-	// todo apply
+
 	// from lastApplied -> rf.commitIndex
+	rf.stateMatch = entry.command.(string)
 	rf.lastApplied = rf.commitIndex
 
 	// 7. 响应客户端请求
@@ -482,6 +581,40 @@ func (rf *Raft) Kill() {
 func (rf *Raft) killed() bool {
 	z := atomic.LoadInt32(&rf.dead)
 	return z == 1
+}
+
+func (rf *Raft) checkConsistent() {
+	// check consistent
+	// 1. check commitIndex >= follower的nextIndex，从nextIndex开始发送给follower
+	// 1.1 success 更新nextIndex和matchIndex
+	// 1.2 failed 减少nextIndex 重试
+	for i := 0; i < len(rf.nextIndex); i++ {
+		if i == rf.me {
+			continue
+		}
+		if rf.commitIndex >= rf.nextIndex[i] {
+			log.Printf("commit index: %d is greater than next index %d:%d, start sync", rf.commitIndex, i, rf.nextIndex[i])
+
+		}
+	}
+}
+
+// commitIndex >= nextIndex  we sync nextIndex -> to commitInd
+func (rf *Raft) syncLog(server int, commitIndex int, nextIndex int) {
+	go func() {
+		rf.mu.Lock()
+		defer rf.mu.Unlock()
+		for commitIndex >= nextIndex {
+			_, replay := rf.replicaLog(server, nextIndex)
+			if replay.Success {
+				rf.matchIndex[server] = nextIndex
+			} else {
+				nextIndex--
+			}
+			log.Printf("try to sync log %d ==> %d: commit index: %d, nextIndex: %d", rf.me, server, commitIndex, nextIndex)
+		}
+
+	}()
 }
 
 func (rf *Raft) ticker() {
@@ -523,6 +656,9 @@ func (rf *Raft) ticker() {
 					break
 				}
 			}
+			// sync checkConsistent
+			rf.checkConsistent()
+
 			// sleep
 			time.Sleep(time.Millisecond * 100)
 		} else if Follower == rf.role {
