@@ -28,7 +28,6 @@ import (
 	"6.5840/labrpc"
 )
 
-
 // as each Raft peer becomes aware that successive log entries are
 // committed, the peer should send an ApplyMsg to the service (or
 // tester) on the same server, via the applyCh passed to Make(). set
@@ -50,6 +49,21 @@ type ApplyMsg struct {
 	SnapshotIndex int
 }
 
+// entry
+type EntryType int
+
+const (
+	EntryNormal EntryType = iota
+	EntryConfChange
+)
+
+type Entry struct {
+	entryType EntryType
+	term      uint64
+	index     int64
+	data      []byte // 暂定这个类型 对应proc类型为 bytes
+}
+
 // A Go object implementing a single Raft peer.
 type Raft struct {
 	mu        sync.Mutex          // Lock to protect shared access to this peer's state
@@ -61,8 +75,34 @@ type Raft struct {
 	// Your data here (3A, 3B, 3C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
+	applyCh        chan ApplyMsg // apply 协程通道
+	applyCond      *sync.Cond    // apply 流程控制信号量
+	replicatorCond []*sync.Cond  // 复制操作控制信号量
+	role           NodeRole      // 节点当前的状态
+	curTerm        int64         // 当前任期
+	votedFor       int64         // 为谁投票
+	grantedVotes   int           // 已经获得票数
+	logs           *RaftLog      // 日志信息
+	commitIdx      int64         // 已经提交的最大日志id
+	lastApplied    int64         // 已经apply的最大日志id
+	nextIdx        []int         // 到其他节点下一个匹配的日志id信息
+	matchIdx       []int         // 到其他节点当前匹配的日志id信息
+
+	leaderId         int64       // 集群当前leader节点的id
+	electionTimer    *time.Timer // 选举超时定时器
+	heartbeatTimer   *time.Timer // 心跳超时定时器
+	heartBeatTimeout uint64      // 心跳超时时间
+	baseElecTimeout  uint64      // 选举超时时间
 
 }
+
+type NodeRole int
+
+const (
+	NodeRoleFollower NodeRole = iota
+	NodeRoleCandidate
+	NodeRoleLeader
+)
 
 // return currentTerm and whether this server
 // believes it is the leader.
@@ -92,7 +132,6 @@ func (rf *Raft) persist() {
 	// rf.persister.Save(raftstate, nil)
 }
 
-
 // restore previously persisted state.
 func (rf *Raft) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
@@ -113,7 +152,6 @@ func (rf *Raft) readPersist(data []byte) {
 	// }
 }
 
-
 // the service says it has created a snapshot that has
 // all info up to and including index. this means the
 // service no longer needs the log through (and including)
@@ -123,17 +161,43 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 
 }
 
-
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
 type RequestVoteArgs struct {
 	// Your data here (3A, 3B).
+	term         int64
+	candidateId  int64
+	lastLogIndex int64
+	lastLogTerm  int64
 }
 
 // example RequestVote RPC reply structure.
 // field names must start with capital letters!
 type RequestVoteReply struct {
 	// Your data here (3A).
+	term        int64
+	voteGranted bool
+}
+
+// AppendEntries
+type AppendEntriesRequest struct {
+	term         int64
+	leaderId     int64
+	prevLogIndex int64
+	prevLogTerm  int64
+	leaderCommit int64
+	entries      []*Entry
+}
+type AppendEntriesReply struct {
+	term          int64
+	success       bool
+	conflictIndex int64 // 理解是为了快速恢复 带回来的index
+	conflictTerm  int64
+}
+
+// AppendEntries RPC handler
+func (rf *Raft) AppendEntries(args *AppendEntriesRequest, reply *AppendEntriesReply) {
+	// todo
 }
 
 // example RequestVote RPC handler.
@@ -173,6 +237,11 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
+// send append entries
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesRequest, reply *AppendEntriesReply) bool {
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	return ok
+}
 
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
@@ -192,7 +261,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (3B).
-
 
 	return index, term, isLeader
 }
@@ -221,7 +289,6 @@ func (rf *Raft) ticker() {
 
 		// Your code here (3A)
 		// Check if a leader election should be started.
-
 
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
@@ -253,7 +320,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
-
 
 	return rf
 }
